@@ -6,61 +6,92 @@ class Sequential(nn.Sequential):
     def loss(self):
         return torch.tensor([l.loss() for l in self if hasattr(l, 'loss')])
 
-class Affine_(nn.Module):
-    @torch.no_grad()
-    def __init__(self, ndim: int, pad_ones=True):
+class Translation(nn.Module):
+    bias: torch.Tensor
+    def __init__(self, ndim, device=None, dtype=None,):
+        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
-        transform = torch.zeros((1, ndim, ndim+1), dtype=torch.double)
-        transform[0, :ndim, :ndim].fill_diagonal_(1.)
-        self.transform = nn.Parameter(transform)
-        self.pad_ones = pad_ones
+        self.bias = nn.Parameter(torch.zeros(ndim, **factory_kwargs))
 
-    def forward(self, grid: SamplingGrid) -> Image:
-        # n, _, d, h, w = self.output_size
-        # base_grid shape is (d, h, w, 4) and theta shape is (n, 3, 4)
-        # We do manually a matrix multiplication which is faster than mm()
-        # (d * h * w, 4, 1) * (n, 1, 4, 3) -> (n, d * h * w, 3)
-        # in einsum:
-        # torch.einsum('dDo,noDt->ndt', grid.view(-1,4,1), self.transform.mT.unsqueeze(1))
-        grid_affined = (
-                (grid.view(-1, self.transform.shape[-1], 1) * self.transform.mT.unsqueeze(1)).sum(-2)
-            ).view(1,*grid.shape[-4:-1], -1)
-        if self.pad_ones:
-            grid_affined = nn.functional.pad(grid_affined, (0,1), value=1) 
-        return grid_affined
-    
+    def forward(self, input1):
+        return input1 + self.bias
+
     def loss(self):
-        return torch.det(self.transform[:, :self.transform.shape[1], :self.transform.shape[1]]).abs()
+        return torch.linalg.norm(self.bias)
 
+class Affine(nn.Linear):
+    @torch.no_grad()
+    def __init__(self, ndim, device=None, dtype=None,):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__(ndim, ndim, **factory_kwargs)
+
+    @torch.no_grad()
+    def reset_parameters(self) -> None:
+        self.bias.fill_(0.)
+        self.weight.fill_(0.)
+        self.weight.fill_diagonal_(1.)
+
+    def loss(self):
+        #return torch.det(self.weight).abs()
+        return self.weight.trace().abs()
 
 class DeformGrid(nn.Module):
-    @torch.no_grad()
-    def __init__(self, ndim: int, node_spacing: float, pad_ones=True):
+    __constants__ = ['ndim', 'spacing']
+    ndim: int
+    bias: torch.Tensor
+    spacing: torch.Tensor
+
+    def __init__(self, size, spacing, device=None, dtype=None, ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
-        self.pad_ones = pad_ones
-        self.mode = 'trilinear' if ndim == 3 else 'bilinear'
-        self.displacements = nn.Parameter(torch.zeros(1, ndim, *node_spacing)  )
-        #smooth = torch.ones((3,1,3,19,19))
-        #self.smooth = smooth/smooth.sum()
+        self.ndim = len(size)
+        self.bias = nn.Parameter(torch.zeros((1, self.ndim, *size,),**factory_kwargs))
+        #self.spacing = nn.Parameter(spacing, requires_grad=False)
+        self.register_buffer('spacing', (spacing * (torch.tensor(size, **factory_kwargs)-1)/2).detach()[[2,1,0]].clone())
 
-    def forward(self, grid:SamplingGrid) -> Image:
-        grid_deformed = grid[...,:self.displacements.shape[1]] + \
-            nn.functional.interpolate(self.displacements, size=grid.shape[-4:-1], mode=self.mode).movedim(1,-1)
-            # nn.functional.conv3d(
-            #     nn.functional.interpolate(self.displacements, size=self.target_grid.shape[:-1], mode=self.mode),
-            #     self.smooth, groups=3, padding='same'
-            # ).movedim(1,-1)
-        if self.pad_ones:
-            grid_deformed = nn.functional.pad(grid_deformed, (0,1), value=1) 
-        return grid_deformed
+    def forward(self, input1):
+        # rescale the input to a 5-D, float, between -1,1 image for grid sample
+        input_rescaled = (input1.view(*(1,) * (2 + self.ndim - input1.dim()), *input1.shape) / self.spacing)
+        return nn.functional.grid_sample(self.bias, input_rescaled, padding_mode='zeros', align_corners=False).moveaxis(1,-1) + input1
+    
+    def loss(self):
+        loss =  torch.gradient(self.bias[0,0], dim=-1)[0] + \
+                torch.gradient(self.bias[0,1], dim=-2)[0] + \
+                torch.gradient(self.bias[0,2], dim=-3)[0]
+        return loss.abs().mean()
 
-    # def to(self, device):
-    #     obj = super().to(device)
-    #     obj.smooth = self.smooth.to(device)
-    #     return obj
+class ProbeAffine(nn.Module):
+    __constants__ = ["ndim"]
+    ndim: int
+    weight: torch.Tensor
+    center: torch.Tensor
+    r2: torch.Tensor
+    init_r: float
+    init_c: tuple
+
+    def __init__(self, ndim, device=None, dtype=None, init_r=1000., init_c=(0.,0.,0.)) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.ndim = ndim
+        self.weight = nn.Parameter(torch.empty((ndim, 1, ndim), **factory_kwargs))
+        self.center = nn.Parameter(torch.empty(ndim, **factory_kwargs))
+        self.r2 = nn.Parameter(torch.empty(tuple(), **factory_kwargs))
+        self.init_c = init_c
+        self.init_r = init_r
+        self.reset_parameters()
+
+    @torch.no_grad()
+    def reset_parameters(self) -> None:
+        self.r2.fill_(self.init_r)
+        self.center.fill_(0.)
+        self.center.add_(torch.tensor(self.init_c, device=self.center.device, dtype=self.center.dtype))
+        self.weight.fill_(0.)
+        #self.weight[:,0,:].fill_diagonal_(.01)
+
+    def forward(self, input1) -> torch.Tensor:
+        input_b = input1 - self.center
+        falloff = nn.functional.softplus(self.r2 - ((input_b) ** 2).sum(dim=-1))[:, None]
+        return nn.functional.bilinear(nn.functional.normalize(falloff, p=2), input_b, self.weight) + input1
 
     def loss(self):
-        loss =  torch.gradient(self.displacements[0,0], dim=-1)[0] + \
-                torch.gradient(self.displacements[0,1], dim=-2)[0] + \
-                torch.gradient(self.displacements[0,2], dim=-3)[0]
-        return loss.abs().mean()
+        return torch.det(self.weight[:,0,:]).abs()

@@ -48,7 +48,7 @@ class Manager(object):
             model_loss_w = torch.tensor(self.model_loss_w, device=ref.device)
             for step in range(iterations):
                 self.optimizer.zero_grad(set_to_none=True)
-                pred = mov.sample(self.model(grid_r))
+                pred = mov.sample(self.model(grid_r)[0])
                 loss = metric(ref, pred) #+ (self.model.loss().to(ref.device)).mean() #* model_loss_w
                 loss.backward()
                 self.optimizer.step()
