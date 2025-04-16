@@ -11,8 +11,8 @@ class Image_(object):
 class SpacedTensor(torch.Tensor):
     tensorfuncs_spacing = (torch.Tensor.to, )
     @staticmethod
-    def __new__(cls, t: torch.tensor, spacing, *args, **kwargs):
-        return super().__new__(cls, t, *args, **kwargs) 
+    def __new__(cls, t: torch.Tensor, spacing, *args, **kwargs):
+        return super().__new__(cls, t, *args, **kwargs)
 
     def __init__(self, img, spacing, **kwargs):
         self.spacing = spacing.clone().detach()
@@ -27,7 +27,7 @@ class SpacedTensor(torch.Tensor):
     def __repr__(self, *args, tensor_contents=None):
         representation = super().__repr__(*args, tensor_contents=tensor_contents)
         return representation[:-1] + f", spacing={str(self.spacing)})"
-    
+
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         newobj = super().__torch_function__(func, types, args, kwargs)
@@ -46,7 +46,7 @@ class Image(SpacedTensor):
     @staticmethod
     def __new__(cls, img, spacing, *args, **kwargs):
         if 2 <= img.ndimension() < 4:
-            return super().__new__(cls, img[None, None, ...], spacing, *args, **kwargs) 
+            return super().__new__(cls, img[None, None, ...], spacing, *args, **kwargs)
         else: raise TypeError('Images must be 2 or 3 dimensional')
 
     def sdimension(self):
@@ -62,7 +62,7 @@ class Image(SpacedTensor):
     def sample(self, grid, padding_mode='zeros', mode='bilinear', align_corners=False):
         sampled =  nn.functional.grid_sample(
             self,
-            torch.Tensor(grid) / (self.spacing * (torch.tensor(self.spatial_shape, device=self.device)-1)/2)[[2,1,0]],
+            torch.Tensor(grid[None]) / (self.spacing * (torch.tensor(self.spatial_shape, device=self.device)-1)/2)[[2,1,0]],
             padding_mode=padding_mode, mode=mode, align_corners=align_corners
         )
         sampled.spacing = grid.spacing.clone().detach()
@@ -88,9 +88,7 @@ class SamplingGrid(SpacedTensor):
             torch.tensor([1], device=img.device),
         ))
 
-        return super().__new__(cls, grid * extended_spacing[[2,1,0,3]], img.spacing, *args, **kwargs) 
+        return super().__new__(cls, grid * extended_spacing[[2,1,0,3]], img.spacing, *args, **kwargs)
 
     def __init__(cls, img, *args, translation_ones=False, align_corners=False, **kwargs):
-        super().__init__(img, img.spacing, **kwargs) 
-
-        
+        super().__init__(img, img.spacing, **kwargs)

@@ -2,6 +2,10 @@ import torch
 from torch import nn
 import math
 
+class CC(nn.Module):
+    def forward(self, y_true, y_pred):
+        return (y_true * y_pred)
+
 class NCC(nn.Module):
     """
     Local (over window) normalized cross correlation loss.

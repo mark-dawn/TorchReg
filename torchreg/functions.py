@@ -23,7 +23,7 @@ def match_hist(dst, ref, bins=255):
 def cal_hist(img, bins=256):
     B, C = img.size()[:2]
     # [B*C bins]
-    if torch.is_grad_enabled(): 
+    if torch.is_grad_enabled():
         hists = soft_histc_batch(img, bins=bins, min=0., max=1., sigma=3*25)
     else:
         hists = torch.stack([torch.histc(img[b,c], bins=bins, min=0., max=1.) for b in range(B) for c in range(C)])
@@ -37,7 +37,7 @@ def cal_hist(img, bins=256):
     return hists
 
 def soft_histc_batch(x, bins=256, min=0, max=256, sigma=3*25):
-    # B C 
+    # B C
     B, C = x.size()[:2]
     # [B*C ...]
     x = x.view(B*C, -1)
@@ -70,3 +70,24 @@ def cal_trans_batch(hist_dst, hist_ref, bins=256, min=0, max=1.0):
     # [B*C bins]
     #table = torch.clamp(table, min=min, max=max)
     return table.mean(dim=1)
+
+def make_kernel(kernel_size, fn, channels=1, groups=1, device=None, dtype=None, ):
+    dims = len(kernel_size)
+    # Create a x, y coordinate grid of shape (kernel_size, kernel_size, 2)
+    cord = [torch.arange(ks, device=device, dtype=dtype) for ks in kernel_size]
+    grid = torch.stack(torch.meshgrid(*cord), dim=-1, ) - (kernel_size - 1)/2.
+
+    kernel = fn(grid)
+    # Make sure sum of values in gaussian kernel equals 1.
+    kernel = kernel / torch.sum(kernel)
+
+    # Reshape to batch, ndim convolutional weight
+    return kernel.view(1, 1, *kernel_size).repeat(channels, channels//groups, *[1]*dims)
+
+def gaussian_kernel(kernel_size, mean=0, variance=1, channels=1, groups=1, device=None, dtype=None):
+    def gauss(k):
+        var=variance
+        m=mean
+        a = 1./2.*torch.pi*var
+        return a * torch.exp(-torch.sum((k-m)**2, dim=-1) / (2.*var))
+    return make_kernel(kernel_size, gauss, channels=channels, groups=groups, device=device, dtype=dtype)
