@@ -17,7 +17,7 @@ class Manager(object):
     def __init__(
         self,
         reference: Image, moving: Image,
-        model, model_loss_w,
+        model,
         optimizer, convergence_val: float, convergence_win: int=5,
         resolutions: tuple=(Resolution(),)
     ):
@@ -25,7 +25,6 @@ class Manager(object):
         self.model = model
         self.convergence_val = convergence_val
         self.convergence_win = convergence_win
-        self.model_loss_w = model_loss_w
         self.stages = [
             (
                 res.iterations,
@@ -36,22 +35,24 @@ class Manager(object):
             for res in resolutions
         ]
 
+
     def fit(self):
         res = []
         # torch.cuda.memory._record_memory_history(
         #     max_entries=100000
         # )
         for iterations, ref, mov, metric, mean_scale in self.stages:
+            print(f"starting stage with iterations: {iterations}, mean scale: {mean_scale:.2f}, ref size: {ref.shape}")
             ref.detach()
             mov.detach()
             losses = torch.full((iterations,), torch.nan, requires_grad=False).to(ref.device)
             grid_r = ref.grid()[...,:-1]
-            self.model[-1].unflattened_size = (1, *grid_r.shape[:-1])
-            model_loss_w = torch.tensor(self.model_loss_w, device=ref.device)
+            unflattened_size = grid_r.shape
             for step in range(iterations):
                 self.optimizer.zero_grad(set_to_none=True)
-                pred = mov.sample(self.model(grid_r)[0])
-                loss = metric(ref, pred) + (model_loss_w * self.model.loss().to(ref.device)).sum()
+                grid_pred = torch.vmap(self.model, chunk_size=4096)(grid_r.reshape(-1, 4, 3))
+                pred = mov.sample(grid_pred.reshape(unflattened_size), ref.spacing)
+                loss = metric(ref, pred) + self.model.loss().sum()
                 loss.backward()
                 self.optimizer.step()
                 with torch.no_grad():

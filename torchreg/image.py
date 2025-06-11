@@ -56,39 +56,31 @@ class Image(SpacedTensor):
     def spatial_shape(self,):
         return self.shape[-self.sdimension():]
 
-    def grid(self, align_corners=False):
-        return SamplingGrid(self, align_corners=align_corners)
-
-    def sample(self, grid, padding_mode='zeros', mode='bilinear', align_corners=False):
+    def sample(self, grid, spacing, padding_mode='zeros', mode='bilinear', align_corners=False):
         sampled =  nn.functional.grid_sample(
             self,
             torch.Tensor(grid[None]) / (self.spacing * (torch.tensor(self.spatial_shape, device=self.device)-1)/2)[[2,1,0]],
             padding_mode=padding_mode, mode=mode, align_corners=align_corners
         )
-        sampled.spacing = grid.spacing.clone().detach()
+        sampled.spacing = spacing.detach().to(sampled.device)
         return sampled
 
     def napari_metadata(self):
         spacing = self.spacing.cpu().numpy()
         return dict(scale=spacing, translate=-np.array(self.spatial_shape)*spacing/2)
 
-
-class SamplingGrid(SpacedTensor):
-    @staticmethod
-    def __new__(cls, img, *args, translation_ones=False, align_corners=False, **kwargs):
-        if img.sdimension() == 3:
-            grid = torch._decomp.decompositions._make_base_grid_5d(img, *img.spatial_shape, align_corners)
-        elif img.sdimension() == 2:
-            grid = torch._decomp.decompositions._make_base_grid_4d(img, *img.spatial_shape, align_corners)
+    def grid(self, align_corners=False):
+        if self.sdimension() == 3:
+            grid = torch._decomp.decompositions._make_base_grid_5d(self, *self.spatial_shape, align_corners)
+        elif self.sdimension() == 2:
+            grid = torch._decomp.decompositions._make_base_grid_4d(self, *self.spatial_shape, align_corners)
         else:
             raise TypeError('SamplingGrids must be built from Images')
 
         extended_spacing = torch.cat((
-            img.spacing * (torch.tensor(img.spatial_shape, device=img.device)-1)/2,
-            torch.tensor([1], device=img.device),
+            self.spacing * (torch.tensor(self.spatial_shape, device=self.device)-1)/2,
+            torch.tensor([1], device=self.device),
         ))
 
-        return super().__new__(cls, grid * extended_spacing[[2,1,0,3]], img.spacing, *args, **kwargs)
+        return grid * extended_spacing[[2,1,0,3]]
 
-    def __init__(cls, img, *args, translation_ones=False, align_corners=False, **kwargs):
-        super().__init__(img, img.spacing, **kwargs)

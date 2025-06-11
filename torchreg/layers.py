@@ -1,11 +1,20 @@
 import torch
 from torch import nn
-from .image import SamplingGrid
 from .functions import gaussian_kernel
 
 class Sequential(nn.Sequential):
+    __constants__ = ['loss_weights']
+    def __init__(self, *args, loss_weights=None, **kwargs):
+        factory_kwargs = {k: kwargs.get(k, None) for k in ["device", "dtype"]}
+        super().__init__(*args, **kwargs)
+        self.register_buffer(
+            "loss_weights", 
+            torch.tensor(loss_weights, **factory_kwargs)
+            if loss_weights is not None
+            else torch.zeros(len(args), **factory_kwargs)
+        )
     def loss(self):
-        return torch.cat([l.loss().view(1) for l in self if hasattr(l, 'loss')])
+        return torch.cat([l.loss().view(1) for l in self if hasattr(l, 'loss')]) * self.loss_weights
 
 class Translation(nn.Module):
     bias: torch.Tensor
@@ -34,7 +43,7 @@ class Affine(nn.Linear):
 
     def loss(self):
         #return torch.det(self.weight).abs()
-        return (1-self.weight.trace()/3).abs()
+        return torch.zeros(1, device=self.weight.device) #(1-(self.weight.trace()).abs()/3)
 
 class DeformGrid(nn.Module):
     __constants__ = ['ndim', 'spacing', 'kernel', '_input_rescaler']
@@ -58,32 +67,32 @@ class DeformGrid(nn.Module):
         # rescale the input to a 5-D, float, between -1,1 image for grid sample
         input_rescaled = (input1.view(*(1,) * (2 + self.ndim - input1.dim()), *input1.shape) / self._input_rescaler)
         deltas = nn.functional.grid_sample(self.bias, input_rescaled, padding_mode='zeros', align_corners=False, mode='nearest')
-        kernels = (4 * self.spacing / input1.spacing).round().int() -1
-        if torch.any(kernels>8):
-            for dim in range(1, self.ndim)[::-1]:
-                kernel = gaussian_kernel(
-                    kernels[dim].view(1),
-                    variance=kernels[dim], channels=3, groups=3,
-                    device=input1.device, dtype=input1.dtype
-                ).detach()
-             #   print(kernel.shape)
-                deltas = nn.functional.conv3d(deltas, kernel.view(*kernel.shape[:2], *torch.where(torch.arange(self.ndim)==dim,-1,1)), padding='same', groups=3)
-        else:
-            kernel = gaussian_kernel(
-                    kernels,
-                    variance=kernels.max(), channels=3, groups=3,
-                    device=input1.device, dtype=input1.dtype
-                ).detach()
-            #print(kernel.shape)
-            deltas = nn.functional.conv3d(deltas, kernel, padding='same', groups=3)
-        return deltas.moveaxis(1,-1) + input1
+        # kernels = torch.tensor((1,), device=input1.device)#(4 * self.spacing / input1[2,2,2]).round().int() -1
+        # if torch.any(kernels>8):
+        #     for dim in range(1, self.ndim)[::-1]:
+        #         kernel = gaussian_kernel(
+        #             kernels[dim].view(1),
+        #             variance=kernels[dim], channels=3, groups=3,
+        #             device=input1.device, dtype=input1.dtype
+        #         ).detach()
+        #      #   print(kernel.shape)
+        #         deltas = nn.functional.conv3d(deltas, kernel.view(*kernel.shape[:2], *torch.where(torch.arange(self.ndim)==dim,-1,1)), padding='same', groups=3)
+        # else:
+        #     kernel = gaussian_kernel(
+        #             kernels,
+        #             variance=kernels.max(), channels=3, groups=3,
+        #             device=input1.device, dtype=input1.dtype
+        #         ).detach()
+        #     #print(kernel.shape)
+        #     deltas = nn.functional.conv3d(deltas, kernel, padding='same', groups=3)
+        return deltas.squeeze().movedim(0,-1) + input1#deltas.moveaxis(1,-1) + input1
 
     def loss(self):
-        # loss =  torch.gradient(self.bias[0,0], dim=-1, spacing=self.spacing[0])[0] + \
-        #         torch.gradient(self.bias[0,1], dim=-2, spacing=self.spacing[1])[0] + \
-        #         torch.gradient(self.bias[0,2], dim=-3, spacing=self.spacing[2])[0]
-        # return (loss / 3).abs().mean()
-        return torch.zeros(1, device=self.bias.device, dtype=self.bias.dtype)
+        loss =  torch.gradient(self.bias[0,0], dim=-1, spacing=self.spacing[0])[0] + \
+                torch.gradient(self.bias[0,1], dim=-2, spacing=self.spacing[1])[0] + \
+                torch.gradient(self.bias[0,2], dim=-3, spacing=self.spacing[2])[0]
+        return (loss / 3).abs().mean()
+        # return torch.zeros(1, device=self.bias.device, dtype=self.bias.dtype)
         # return self.bias.abs().mean()
 
 class ProbeAffine(nn.Module):
